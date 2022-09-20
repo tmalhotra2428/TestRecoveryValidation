@@ -1,0 +1,234 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "automationAccountName": {
+            "defaultValue": "YourAutomationAccount",
+            "type": "String",
+            "metadata": {
+                "description": "Automation account name"
+            }
+        },
+        "ResourceGroupLocation": {
+            "type": "string"
+        },
+        "ProtectedItemARMId": {
+            "type": "string"
+        },
+        "Interval": {
+            "type": "int"
+        },
+        "Frequency": {
+            "type": "string"
+        }
+    },
+    "resources": [
+        {
+            "apiVersion": "2019-10-01",
+            "name": "[parameters('automationAccountName')]",
+            "resourceGroup": "[resourceGroup().name]",
+            "type": "Microsoft.Resources/deployments",
+            "subscriptionId": "[subscription().subscriptionId]",
+            "dependsOn": [],
+            "properties": {
+                "mode": "Incremental",
+                "expressionEvaluationOptions": {
+                    "scope": "inner"
+                },
+                "parameters": {
+                    "automationAccountLocation": {
+                        "value": "[parameters('ResourceGroupLocation')]"
+                    },
+                    "automationAccountName": {
+                        "value": "[parameters('automationAccountName')]"
+                    },
+                    "automationAccountArmApiVersion": {
+                        "value": "2018-06-30"
+                    },
+                    "protectedItemARMId": {
+                        "value": "[parameters('ProtectedItemARMId')]"
+                    },
+                    "interval": {
+                        "value": "[parameters('Interval')]"
+                    },
+
+                    "frequency": {
+                        "value": "[parameters('Frequency')]"
+                    }
+
+                },
+                "template": {
+                    "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "automationAccountLocation": {
+                            "type": "string"
+                        },
+                        "automationAccountName": {
+                            "type": "string"
+                        },
+                        "automationAccountArmApiVersion": {
+                            "type": "string"
+                        },
+                        "protectedItemARMId": {
+                            "type": "string"
+                        },
+                        "interval": {
+                            "type": "int"
+                        },
+                        "frequency": {
+                            "type": "string"
+                        },
+                        "newGuid": {
+                            "defaultValue": "[newGuid()]",
+                            "type": "String",
+                            "metadata": {
+                                "description": "Enter new GUID, you can generate one from Powershell using new-guid or get one from this site: <a target=new href=https://guidgenerator.com/online-guid-generator.aspx>GUID Generator</a>"
+                            }
+                        }
+                    },
+                    "resources": [
+                        {
+                            "type": "Microsoft.Automation/automationAccounts",
+                            "apiVersion": "[parameters('automationAccountArmApiVersion')]",
+                            "name": "[parameters('automationAccountName')]",
+                            "location": "[parameters('automationAccountLocation')]",
+                            "identity": {
+                                "type": "SystemAssigned"
+                            },
+                            "properties": {
+                                "sku": {
+                                    "name": "Basic"
+                                }
+                            },
+                            "resources": [
+                                {
+                                    "type": "variables",
+                                    "apiVersion": "2021-04-01",
+                                    "name": "ProtectedItemARMId",
+                                    "dependsOn": [
+                                        "[resourceId('Microsoft.Automation/automationAccounts/', parameters('automationAccountName'))]"
+                                    ],
+                                    "properties": {
+                                        "description": "ProtectedItemARMId",
+                                        "value": "[concat('\"',parameters('protectedItemARMId'),'\"')]"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "type": "Microsoft.Automation/automationAccounts/runbooks",
+                            "apiVersion": "2020-01-13-preview",
+                            "name": "[concat(parameters('automationAccountName'), '/', 'runscript')]",
+                            "location": "[parameters('automationAccountLocation')]",
+                            "dependsOn": [
+                                "[resourceId('Microsoft.Automation/automationAccounts/', parameters('automationAccountName'))]"
+                            ],
+                            "properties": {
+                                "description": "Automation script for test restore",
+                                "runbookType": "PowerShell",
+                                "logProgress": false,
+                                "logVerbose": true,
+                                "publishContentLink": {
+                                    "uri": "https://github.com/Azure/azure-quickstart-templates/blob/master/demos/asr-automation-recovery/scripts/UpdateDNS.ps1",
+                                    "version": "1.0.0.0"
+                                }
+                            }
+                        },
+                        {
+                            "type": "Microsoft.Automation/automationAccounts/schedules",
+                            "apiVersion": "2021-04-01",
+                            "name": "[concat(parameters('automationAccountName'), '/', 'startBootstrap')]",
+                            "dependsOn": [
+                                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
+                                "runscript"
+                            ],
+                            "properties": {
+                                "description": "Starts the bootstrap runbooks",
+                                "expiryTime": "9999-12-31T17:59:00-06:00",
+                                "isEnabled": true,
+                                "interval": "[parameters('interval')]",
+                                "frequency": "[parameters('frequency')]"
+                            }
+                        },
+                        {
+                            "type": "Microsoft.Automation/automationAccounts/jobSchedules",
+                            "apiVersion": "2021-04-01",
+                            "name": "[concat(parameters('automationAccountName'), '/', parameters('newGuid'))]",
+                            "location": "eastus",
+                            "dependsOn": [
+                                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
+                                "startBootstrap",
+                                "runscript"
+                            ],
+                            "properties": {
+                                "schedule": {
+                                    "name": "startBootstrap"
+                                },
+                                "runbook": {
+                                    "name": "runscript"
+                                }
+                            }
+                        }
+                    ],
+                    "outputs": {
+                        "principalId": {
+                            "type": "string",
+                            "value": "[reference(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), parameters('automationAccountArmApiVersion'), 'Full').Identity.principalId]"
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2019-10-01",
+            "name": "[concat('RoleAssignment',uniqueString(subscription().subscriptionId))]",
+            "subscriptionId": "[subscription().subscriptionId]",
+            "location": "[parameters('ResourceGroupLocation')]",
+            "dependsOn": [],
+            "properties": {
+                "mode": "Incremental",
+                "expressionEvaluationOptions": {
+                    "scope": "inner"
+                },
+                "parameters": {
+                    "automationAccountName": {
+                        "value": "[parameters('automationAccountName')]"
+                    },
+                    "autoManageAccountPrincipalId": {
+                        "value": "[reference(parameters('automationAccountName')).outputs.principalId.value]"
+                    }
+                },
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "automationAccountName": {
+                            "type": "string"
+                        },
+                        "autoManageAccountPrincipalId": {
+                            "type": "string"
+                        }
+                    },
+                    "variables": {
+                        "contributorRole": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]"
+                    },
+                    "resources": [
+                        {
+                            "type": "Microsoft.Authorization/roleAssignments",
+                            "apiVersion": "2020-04-01-preview",
+                            "name": "[guid(parameters('automationAccountName'), variables('contributorRole'))]",
+                            "properties": {
+                                "roleDefinitionId": "[variables('contributorRole')]",
+                                "principalId": "[parameters('autoManageAccountPrincipalId')]",
+                                "principalType": "ServicePrincipal",
+                                "scope": "[subscription().id]"
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}
