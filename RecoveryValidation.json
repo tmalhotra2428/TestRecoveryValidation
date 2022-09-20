@@ -20,6 +20,9 @@
         },
         "Frequency": {
             "type": "string"
+        },
+        "StorageAccountARMId": {
+            "type": "string"
         }
     },
     "resources": [
@@ -54,6 +57,9 @@
 
                     "frequency": {
                         "value": "[parameters('Frequency')]"
+                    },
+                    "storageAccountARMId" : {
+                        "value": "[parameters('StorageAccountARMId')]"
                     }
 
                 },
@@ -78,6 +84,9 @@
                         },
                         "frequency": {
                             "type": "string"
+                        },
+                        "storageAccountARMId":{
+                            "type":"string"
                         },
                         "newGuid": {
                             "defaultValue": "[newGuid()]",
@@ -113,6 +122,18 @@
                                         "description": "ProtectedItemARMId",
                                         "value": "[concat('\"',parameters('protectedItemARMId'),'\"')]"
                                     }
+                                },
+                                {
+                                    "type": "variables",
+                                    "apiVersion": "2021-04-01",
+                                    "name": "StorageAccountARMId",
+                                    "dependsOn": [
+                                        "[resourceId('Microsoft.Automation/automationAccounts/', parameters('automationAccountName'))]"
+                                    ],
+                                    "properties": {
+                                        "description": "StorageAccountARMId",
+                                        "value": "[concat('\"',parameters('storageAccountARMId'),'\"')]"
+                                    }
                                 }
                             ]
                         },
@@ -130,7 +151,7 @@
                                 "logProgress": false,
                                 "logVerbose": true,
                                 "publishContentLink": {
-                                    "uri": "https://github.com/Azure/azure-quickstart-templates/blob/master/demos/asr-automation-recovery/scripts/UpdateDNS.ps1",
+                                    "uri": "https://raw.githubusercontent.com/tmalhotra2428/TestRecoveryValidation/main/Restore.ps1",
                                     "version": "1.0.0.0"
                                 }
                             }
