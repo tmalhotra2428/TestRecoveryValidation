@@ -22,9 +22,11 @@ CleanupTimeWindowHours
 targetResourceGroupName
 RestoreId
 
-Properties created in cleanup job
 CleanupStartTime
 CleanupEndTime
+
+protectedItem
+ASRCleanupJobId
 #>
 function GetTestRestoreJobs()
 {
@@ -61,6 +63,69 @@ function IfRGExists([string] $rgName)
 	}
 }
 
+function TriggerCleanup([string] $targetResourceGroupName)
+{
+	$protectedItem = Get-AutomationVariable -Name protectedItem
+	$protectedItemSplit = $protectedItem -split "/"
+	$subscriptionId = $protectedItemSplit[2]
+	Select-AzSubscription -SubscriptionId $subscriptionId
+	$sourceResourceGroupName = $protectedItemSplit[4]
+	$vaultName = $protectedItemSplit[8]
+	$vault = Get-AzRecoveryServicesVault -ResourceGroupName $sourceResourceGroupName -Name $vaultName 
+	
+	if($protectedItemSplit[9].Contains("backup"))
+	{
+		Write-Output "$(Get-Date) Backup: Deleting the target resource group $targetResourceGroupName"
+		$targetRG = Get-AzResource -ResourceGroupName $targetResourceGroupName
+		#TODO : remove lock
+		Get-AzResourceGroup -Name $targetResourceGroupName | Remove-AzResourceGroup -Force -AsJob
+	}
+	else
+	{			
+		Set-AzRecoveryServicesAsrVaultSettings -Vault $vault
+		$sourceContainerName = $protectedItemSplit[12]
+		$primaryFabricObject = Get-AzRecoveryServicesAsrFabric -Name $protectedItemSplit[10]
+		$primaryContainerObject = Get-AzRecoveryServicesAsrProtectionContainer -Fabric $primaryFabricObject -Name $sourceContainerName
+		$protectedItemObject = Get-AzRecoveryServicesAsrReplicationProtectedItem -ProtectionContainer $primaryContainerObject -Name $protectedItemSplit[14]
+		Write-Output "$(Get-Date) ASR: Triggerig the TFO cleanup for protected item : $protectedItem"
+		$currentJob = Start-AzRecoveryServicesAsrTestFailoverCleanupJob -ReplicationProtectedItem $protectedItemObject -Comment "TFO cleanup"
+		Set-AutomationVariable -Name ASRCleanupJobId -Value $currentJob.Id
+	}
+}
+
+function IsCleanupCompleted([string] $targetResourceGroupName)
+{
+	Write-Output "$(Get-Date) Checking if cleanup is completed."
+	$protectedItem = Get-AutomationVariable -Name protectedItem
+	$protectedItemSplit = $protectedItem -split "/"
+	$subscriptionId = $protectedItemSplit[2]
+	Select-AzSubscription -SubscriptionId $subscriptionId
+	$sourceResourceGroupName = $protectedItemSplit[4]
+	$vaultName = $protectedItemSplit[8]
+	$vault = Get-AzRecoveryServicesVault -ResourceGroupName $sourceResourceGroupName -Name $vaultName 
+	
+	if($protectedItemSplit[9].Contains("backup"))
+	{
+		Write-Output "$(Get-Date) Backup: checking if RG exists $targetResourceGroupName"
+		$rgExists = IfRGExists $targetResourceGroupName
+	}
+	else
+	{			
+		Set-AzRecoveryServicesAsrVaultSettings -Vault $vault
+		Write-Output "$(Get-Date) ASR: Checking TFO cleanup status for job id : "
+		$jobId = Get-AutomationVariable -Name ASRCleanupJobId
+		$currentJob = Get-ASRJob -Name $jobId
+		if (($currentJob.State -eq "InProgress") -or ($currentJob.State -eq "NotStarted"))
+		{
+			return $false
+		}
+		else
+		{
+			return $true
+		}
+	}
+}
+
 Import-Module Az.RecoveryServices
 try
 {
@@ -71,28 +136,6 @@ catch {
     Write-Error -Message $_.Exception
     throw $_.Exception
 }
-
-<#
-- Check all variables in the runbooks.
-- Find all restore ids which has the following properties:
-	- (Validation completed)
-	- (Mannual sign off not needed && time window has passed) || (Mannual sign off is needed and given.)
-- for each restore id:
-	- Remove locks if any. Trigger the delete of Target Resource group.
-	- Update the following properties in the entity:
-		- "Test Restore job" status to "Cleanup in progress".
-		- "Cleanup Start time" to DateTime.UtcNow.
-
-- Check all variables in the runbooks.
-- Find all restore ids which has the following properties:
-	- (Cleanup in progress)
-	- Check if deletion of resource group is complete?
-		- Push the following in the report(LA):
-			- Time when we found the deletion is completed.
-			- <Any other thing?>
-		- Update the "Test Restore job" status to "Cleanup Completed".
-		- We are not deleting the variable. 
-#>
 
 $State =  Get-AutomationVariable -Name State
 $MannualSignOff = Get-AutomationVariable -Name MannualSignOff
@@ -107,43 +150,43 @@ $targetResourceGroupName = Get-AutomationVariable -Name targetResourceGroup1
 	Write-Output "$(Get-Date) Current state is $State"
 	
 	$currentTime = Get-Date
-	
-	
-	Write-Output "$(Get-Date) Validation completion time is $ValidationCompletionTime"
+
+	Write-Output "$(Get-Date) Expected Validation completion time is $ValidationCompletionTime"
 	$ExpectedDeletionTime = $ValidationCompletionTime.AddHours($CleanupTimeWindowInHours)
 	Write-Output "$(Get-Date) Expected deletion time is $ExpectedDeletionTime"
 	#Write-Output "$(Get-Date) Validation time"
 
-	$rgExists = IfRGExists $targetResourceGroupName
-	Write-Output "$(Get-Date) Resource group exists : $rgExists"
-	
 	if (($State -eq $VALIDATION_COMPLETED ) -And 
 		(($MannualSignOff -eq $false -And ($ExpectedDeletionTime -lt $currentTime)) -Or
 		 ($MannualSignOff -eq $true -And $MannualSignOffGiven -eq $true))
 		)
 	{
-		Write-Output "$(Get-Date) Deleting the target resource group $targetResourceGroupName"
-		$targetRG = Get-AzResource -ResourceGroupName $targetResourceGroupName
-		#TODO : remove lock
-		Get-AzResourceGroup -Name $targetResourceGroupName | Remove-AzResourceGroup -Force -AsJob
+		TriggerCleanup $targetResourceGroupName
+		
 		Write-Output "$(Get-Date) Updating the state to $CLEANUP_IN_PROGRESS"
 		Set-AutomationVariable -Name State -Value $CLEANUP_IN_PROGRESS
 		Write-Output "$(Get-Date) Updating the cleanup start time to $currentTime"
 		Set-AutomationVariable -Name CleanupStartTime -Value $currentTime
 	}
-	elseif (($State -eq $CLEANUP_IN_PROGRESS ) -And ($rgExists -eq $false))
+	elseif ($State -eq $CLEANUP_IN_PROGRESS)
 	{
-		#Not accurate
-		Write-Output "$(Get-Date) Updating the cleanup end time to $currentTime"
-		Set-AutomationVariable -Name CleanupEndTime -Value $currentTime
-		#- Log Time when we found the deletion is completed.
-		Write-Output "$(Get-Date) Updating the state to $CLEANUP_COMPLETED"
-		Set-AutomationVariable -Name State -Value $CLEANUP_COMPLETED
-	}
-	elseif (($State -eq $CLEANUP_IN_PROGRESS ) -And ($rgExists -eq $true))
-	{
-		#Not accurate
-		Write-Output "$(Get-Date) Cleanup of resource group is in progress"
+		
+		$isCleanupCompleted = IsCleanupCompleted $targetResourceGroupName
+		Write-Output "$(Get-Date) Cleanup complete status : $isCleanupCompleted"
+
+		if ($isCleanupCompleted -eq $true)
+		{
+			#Not accurate
+			Write-Output "$(Get-Date) Updating the cleanup end time to $currentTime"
+			Set-AutomationVariable -Name CleanupEndTime -Value $currentTime
+			#- Log Time when we found the deletion is completed.
+			Write-Output "$(Get-Date) Updating the state to $CLEANUP_COMPLETED"
+			Set-AutomationVariable -Name State -Value $CLEANUP_COMPLETED
+		}
+		else
+		{
+			Write-Output "$(Get-Date) Cleanup is in progress"
+		}
 	}
 	else
 	{
