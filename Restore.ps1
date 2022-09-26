@@ -1,13 +1,3 @@
-<#
-    .DESCRIPTION
-        An example runbook which gets all the ARM resources using the Managed Identity
-
-    .NOTES
-        AUTHOR: Azure Automation Team
-        LASTEDIT: Oct 26, 2021
-#>
-
-"Please enable appropriate RBAC permissions to the system identity of this automation account. Otherwise, the runbook may fail..."
 Import-Module Az.RecoveryServices
 try
 {
@@ -19,47 +9,40 @@ catch {
     throw $_.Exception
 }
 
-<#Get all ARM resources from all resource groups
-$ResourceGroups = Get-AzResourceGroup
+#States of test restore jobs
+$CLEANUP_COMPLETED = "CleanupCompleted"
+$TEST_RESTORE_IN_PROGRESS = "TestRestoreInProgress"
+$TEST_RESTORE_TRIGGER_FAILED = "TestRestoreTriggerFailed"
 
-foreach ($ResourceGroup in $ResourceGroups)
-{    
-    Write-Output ("Showing resources in resource group " + $ResourceGroup.ResourceGroupName)
-    $Resources = Get-AzResource -ResourceGroupName $ResourceGroup.ResourceGroupName
-    foreach ($Resource in $Resources)
-    {
-        Write-Output ($Resource.Name + " of type " +  $Resource.ResourceType)
-    }
-    Write-Output ("")
-}#>
+$state = Get-AutomationVariable -Name State
+if(($state -ne $CLEANUP_COMPLETED) -and ($state -ne $TEST_RESTORE_TRIGGER_FAILED))
+{
+	Write-Output "Cleanup is not yet completed. Skipping operation."
+	Exit
+}
 
 $protectedItem = Get-AutomationVariable -Name protectedItem
 $protectedItemSplit = $protectedItem -split "/"
 
-$protectedItemSplit
 
-#$subscriptionId = Get-AutomationVariable -Name subscriptionId
 $subscriptionId = $protectedItemSplit[2]
-$subscriptionId
+
 Select-AzSubscription -SubscriptionId $subscriptionId
 
-#$sourceResourceGroupName = Get-AutomationVariable -Name sourceResourceGroup
 $sourceResourceGroupName = $protectedItemSplit[4]
-$sourceResourceGroupName
 
-#$vaultName = Get-AutomationVariable -Name vault
+
 $vaultName = $protectedItemSplit[8]
-$vaultName
+
 $vault = Get-AzRecoveryServicesVault -ResourceGroupName $sourceResourceGroupName -Name $vaultName 
+
 
 if($protectedItemSplit[9].Contains("backup"))
 {
-	Write-Output "In Backup"
-	#$sourceContainerName = Get-AutomationVariable -Name sourceVMName 
+	Write-Output "In Backup's Restore"
+	
 	$sourceContainerNameSplit = $protectedItemSplit[12] -split ";"
-	$sourceContainerNameSplit
 	$sourceContainerName = $sourceContainerNameSplit[3]
-	$sourceContainerName
 	$sourceContainerList =  Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM -Status Registered -VaultId $vault.ID
 
 	$sourceContainer = $sourceContainerList |  where {$_.FriendlyName.ToLower() -eq $sourceContainerName}
@@ -70,19 +53,11 @@ if($protectedItemSplit[9].Contains("backup"))
 
 	$latestRp =  $rpList[0]
 
-	#Create VNET and subnet
-	<#$testSubnet = New-AzVirtualNetworkSubnetConfig -Name "testRestoreSubnet" -AddressPrefix "10.0.0.0/24"
-
-	$testVnet = New-AzVirtualNetwork -AddressPrefix 10.33.0.0/16 -Location $vault.Location -Name $testVnetName -ResourceGroupName $targetResourceGroupName -Subnet $testSubnet
-	$testVnet | Set-AzVirtualNetwork#>
-
-
-	$testVnetName = Get-AutomationVariable -Name targetVNETName
 	$targetResourceGroupName = $sourceContainerName+"_testResourceGroup_" + (Get-Date).Ticks
-
 	New-AzResourceGroup -Name $targetResourceGroupName -Location $vault.Location
-
 	Set-AutomationVariable -Name targetResourceGroupName -Value $targetResourceGroupName
+
+	$testVnetName = "testVNET"
 
 	$vnet = @{
 		Name = $testVnetName
@@ -108,17 +83,81 @@ if($protectedItemSplit[9].Contains("backup"))
 
 	#$storageAccountResourceGroup = Get-AutomationVariable -Name storageAccountRG
 	$targetVMName = Get-AutomationVariable -Name targetVMName
-	$targetVNETName = Get-AutomationVariable -Name targetVNETName
-	$job = Restore-AzRecoveryServicesBackupItem -RecoveryPoint $latestRp -TargetResourceGroupName $targetResourceGroupName -StorageAccountName $storageAccountName -StorageAccountResourceGroupName $storageAccountResourceGroup -TargetVMName $targetVMName -TargetVNetName $targetVNETName -TargetVNetResourceGroup $targetResourceGroupName -TargetSubnetName "testRestoreSubnet" -VaultId $vault.ID -VaultLocation $vault.Location
+	#$targetVNETName = Get-AutomationVariable -Name targetVNETName
+	$job = Restore-AzRecoveryServicesBackupItem -RecoveryPoint $latestRp -TargetResourceGroupName $targetResourceGroupName -StorageAccountName $storageAccountName -StorageAccountResourceGroupName $storageAccountResourceGroup -TargetVMName $targetVMName -TargetVNetName $testVnetName -TargetVNetResourceGroup $targetResourceGroupName -TargetSubnetName "testRestoreSubnet" -VaultId $vault.ID -VaultLocation $vault.Location
 
 	$job | Format-List *
 
-	Set-AutomationVariable -Name JobId -Value $job.JobId
-	Set-AutomationVariable -Name ActivityId -Value $job.ActivityId
+	if($job)
+	{
+		Set-AutomationVariable -Name JobId -Value $job.JobId
+		Set-AutomationVariable -Name ActivityId -Value $job.ActivityId
+	}
+	else
+	{
+		Set-AutomationVariable -Name State -Value $TEST_RESTORE_TRIGGER_FAILED
+	}
+
+}
+else
+{
+	Write-Output "In ASR's Failover"
+	
+	Set-AzRecoveryServicesAsrVaultSettings -Vault $vault
+
+	$sourceContainerName = $protectedItemSplit[12]
+
+	$primaryFabricObject = Get-AzRecoveryServicesAsrFabric -Name $protectedItemSplit[10]
+
+	$primaryContainerObject = Get-AzRecoveryServicesAsrProtectionContainer -Fabric $primaryFabricObject -Name $sourceContainerName
+
+	$protectedItemObject = Get-AzRecoveryServicesAsrReplicationProtectedItem -ProtectionContainer $primaryContainerObject -Name $protectedItemSplit[14]
+
+	$recoveryPoints = Get-AzRecoveryServicesAsrRecoveryPoint -ReplicationProtectedItem $protectedItemObject 
+
+	$latestRp =  $recoveryPoints[0]
+
+	$targetResourceGroupName = $sourceContainerName+"_testResourceGroup_" + (Get-Date).Ticks
+	New-AzResourceGroup -Name $targetResourceGroupName -Location $vault.Location
+	Set-AutomationVariable -Name targetResourceGroupName -Value $targetResourceGroupName
+	
+	$testVnetName = "testVNET"
+
+	$vnet = @{
+		Name = $testVnetName
+		ResourceGroupName = $targetResourceGroupName
+		Location = $vault.Location
+		AddressPrefix = '10.0.0.0/16'    
+	}
+
+	$testVnet = New-AzVirtualNetwork @vnet
+
+	$subnet = @{
+		Name = 'testRestoreSubnet'
+		VirtualNetwork = $testVnet
+		AddressPrefix = '10.0.0.0/24'
+	}
+	
+	$subnetConfig = Add-AzVirtualNetworkSubnetConfig @subnet
+
+	$testVnet | Set-AzVirtualNetwork
+
+	
+	$job = Start-AzRecoveryServicesAsrTestFailoverJob -ReplicationProtectedItem $protectedItemObject -Direction PrimaryToRecovery -RecoveryPoint $latestRp -AzureVMNetworkId $testVnet.Id
+	$job | Format-List *
+
+	if($job)
+	{
+		Set-AutomationVariable -Name JobId -Value $job.ID
+	}
+	else
+	{
+		Set-AutomationVariable -Name State -Value $TEST_RESTORE_TRIGGER_FAILED
+	}
+	
 }
 
-
-
-
+Set-AutomationVariable -Name State -Value $TEST_RESTORE_IN_PROGRESS
+exit $LASTEXITCODE
 
 
